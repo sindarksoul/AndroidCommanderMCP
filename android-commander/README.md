@@ -1,22 +1,44 @@
-# Android Commander MCP — v0.1 MVP
+# Android Commander MCP — Read-only Android control (experimental)
 
-Native Kotlin Android client + Python HTTPS relay + local MCP stdio adapter.
+Native Kotlin Android client, Python HTTPS relay, and MCP interfaces for approved Android requests.
 
-## Features
-- Device information, battery status and internal storage stats.
-- **Every request requires a visible, one-time approval on the phone.**
-- Separate device and client bearer tokens.
-- No root, ADB, shell, file browsing, or background device surveillance.
-- App must remain open and connected; MVP is **not** a background service.
+## Available tools
 
-## Build APK without a PC
-1. Upload the project contents to a **private** GitHub repository (keep the directory structure).
-2. Open **Actions → Build Android APK → Run workflow**.
-3. Download the `android-commander-debug-apk` workflow artifact and install its APK on your Android phone.
-4. This is a development-signed APK, not a production release. Verify the GitHub repository and workflow before installation.
+| MCP tool | Function |
+|---|---|
+| `android_device_info` | Android device details |
+| `android_battery_info` | Battery status |
+| `android_storage_info` | Internal storage statistics |
+| `android_list_files(path="")` | List up to 100 immediate entries in the approved folder |
+| `android_file_info(path)` | File/folder metadata |
+| `android_read_file(path)` | Read up to 16 KiB of UTF-8 text |
 
-## Run the relay (on your own HTTPS server)
-Use Python 3.11+ and a publicly reachable HTTPS domain with a valid TLS certificate. The Android app refuses plain HTTP.
+The three file tools have been tested end-to-end with a Vivo Android phone, a Render HTTPS relay, and a Google Colab MCP client. The original device tools were previously tested.
+
+## Security model
+
+- Every command requires a visible, one-time approval on the phone.
+- File access is restricted to the directory selected through Android's Storage Access Framework folder picker.
+- File paths are relative to that approved directory. No absolute paths or traversal outside it.
+- Read-only: no file modification, deletion, shell execution, or background surveillance.
+- Distinct `DEVICE_TOKEN` and `CLIENT_TOKEN` bearer credentials. Never commit or paste secrets into public logs.
+- App must remain open and connected; this experimental MVP is not a background service.
+
+## Build locally on Windows (without GitHub Actions)
+
+Requires Android SDK, JDK 17, and Gradle 8.11.1. From `android-commander/`:
+
+```powershell
+$env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-17.0.21.9-hotspot'
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+& 'C:\Users\Admin\AppData\Local\Android\DevTools\gradle-8.11.1\bin\gradle.bat' :app:assembleDebug --no-daemon --console=plain
+```
+
+Output: `android/app/build/outputs/apk/debug/app-debug.apk`. The debug APK is for testing only.
+
+## Run the relay
+
+Python 3.11+ and an HTTPS deployment are required. For a local deployment:
 
 ```bash
 cd relay
@@ -28,25 +50,47 @@ export CLIENT_TOKEN="$(python -c 'import secrets;print(secrets.token_urlsafe(48)
 uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-Put a reverse proxy with HTTPS (e.g. Caddy) in front of port 8765; never expose the raw HTTP port publicly. Save both generated tokens securely; these must remain identical across relay restarts. Do not commit tokens to GitHub. For a quick deployment, use a trusted HTTPS reverse proxy/tunnel to localhost:8765. The relay currently keeps requests in RAM, supports one process, and loses outstanding requests on restart.
+For a hosted deployment, configure the same environment variables securely in the hosting dashboard and expose the service over HTTPS. The relay uses an in-memory queue and is designed for a single process; pending requests can be lost on restart.
 
 ## Connect Android
-Open the APK, enter the public `https://...` relay URL and the **DEVICE_TOKEN**, then tap Connect. Keep the app foregrounded. Approve or deny each request in the dialog.
+
+1. Open the APK and enter the HTTPS relay **base URL** (do not append `/mcp`).
+2. Enter the `DEVICE_TOKEN`.
+3. Tap **Choose folder for read-only MCP access** and select only a folder you are comfortable sharing with authenticated clients.
+4. Tap **Connect**, keep the app open, and approve each incoming request individually.
 
 ## Connect an MCP client
-Run `relay/mcp_server.py` as a **local stdio MCP server** with environment variables `RELAY_URL=https://your-domain.example` and `CLIENT_TOKEN=<the relay client token>`. It exposes `android_device_info`, `android_battery_info`, `android_storage_info`.
 
-Example direct relay test from a machine with HTTPS access (Android must be connected):
-```bash
-curl -X POST "https://your-domain.example/client/request/device_info" -H "Authorization: Bearer YOUR_CLIENT_TOKEN"
+Use the HTTPS MCP endpoint `https://YOUR-RELAY/mcp` with header `Authorization: Bearer YOUR_CLIENT_TOKEN`.
+
+Alternatively run `relay/mcp_server.py` as a local stdio MCP adapter with `RELAY_URL` and `CLIENT_TOKEN` environment variables.
+
+For Python clients using `mcp` and `httpx`:
+
+```python
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+async with httpx.AsyncClient(
+    headers={"Authorization": f"Bearer {CLIENT_TOKEN}"}, timeout=90
+) as http_client:
+    async with streamable_http_client(MCP_URL, http_client=http_client) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            print([tool.name for tool in (await session.list_tools()).tools])
+            result = await session.call_tool("android_list_files", {"path": ""})
+            print(result)
 ```
 
-**Important:** A local stdio MCP server is not automatically a ChatGPT connector. ChatGPT integration may require a remotely hosted MCP endpoint and appropriate product support; this MVP's stdio adapter is designed for MCP clients that support local servers. Do not claim ChatGPT connectivity until integration is configured and verified.
+This does not automatically connect ChatGPT or Qwen; each client must be configured separately.
 
-## Security limits / next release
-- Tokens are stored in Android app-private preferences, **not encrypted at rest**; improve using Android Keystore before production.
-- Relay stores outstanding jobs only in memory. No persistence, multi-worker coordination, rate limiting, or audit trail yet.
-- Approval is per request, but the v0.1 polling loop can retrieve multiple requests before prior dialogs are answered. Use only with trusted clients.
-- Use private infrastructure and long random tokens; protect relay from abusive traffic with a firewall/rate limiting.
-- Debug APK is suitable for testing only; no production signing, penetration testing, or security audit has been completed.
-- Do not deploy to shared/public production infrastructure without hardening.
+## Known limitations and hardening backlog
+
+- Debug APK only; no production signing or independent security audit.
+- Android token storage currently uses app-private preferences rather than Android Keystore.
+- Relay lacks persistent queues, rate limiting, and an audit log.
+- Phone approval dialogs may overlap when multiple requests arrive.
+- Keep the service private to trusted users and rotate any exposed tokens.
+
+See [FILE_ACCESS.md](FILE_ACCESS.md) for file-access details.
