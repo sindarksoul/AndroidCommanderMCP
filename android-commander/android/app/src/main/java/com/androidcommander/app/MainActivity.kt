@@ -70,7 +70,7 @@ class MainActivity : Activity() {
         val root = DocumentFile.fromTreeUri(this, Uri.parse(uriString)) ?: return null
         if (path.isEmpty()) return root
         val parts = path.split("/")
-        if (parts.any { it.isEmpty() || it == "." || it == ".." || it.contains('\\\\') }) return null
+        if (parts.any { it.isEmpty() || it == "." || it == ".." || it.contains(92.toChar()) }) return null
         var current: DocumentFile = root
         for (part in parts) {
             if (!current.isDirectory) return null
@@ -114,7 +114,16 @@ class MainActivity : Activity() {
                 }
                 val stream = contentResolver.openInputStream(file.uri)
                     ?: return JSONObject().put("error", "Unable to open file")
-                val bytes = stream.use { it.readNBytes(16385) }
+                val bytes = stream.use { input ->
+                    val buffer = ByteArray(16385)
+                    var count = 0
+                    while (count < buffer.size) {
+                        val n = input.read(buffer, count, buffer.size - count)
+                        if (n <= 0) break
+                        count += n
+                    }
+                    buffer.copyOf(count)
+                }
                 val truncated = bytes.size > 16384
                 val textBytes = if (truncated) bytes.copyOf(16384) else bytes
                 val decoder = Charsets.UTF_8.newDecoder()
