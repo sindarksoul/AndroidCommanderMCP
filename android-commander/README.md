@@ -50,3 +50,34 @@ curl -X POST "https://your-domain.example/client/request/device_info" -H "Author
 - Use private infrastructure and long random tokens; protect relay from abusive traffic with a firewall/rate limiting.
 - Debug APK is suitable for testing only; no production signing, penetration testing, or security audit has been completed.
 - Do not deploy to shared/public production infrastructure without hardening.
+
+## Optional local Wi-Fi ADB connection tools
+
+The local `relay/mcp_server.py` adapter now provides five additional tools:
+`android_adb_pair`, `android_adb_connect`, `android_adb_devices`,
+`android_adb_status`, and `android_adb_disconnect`.
+
+**Important architecture distinction:** These tools run ADB on the machine hosting
+the local stdio MCP adapter. They do **not** run ADB on the hosted Render relay
+or inside the Android APK, and are not exposed by the hosted `/mcp` endpoint.
+For Wi-Fi ADB, run the local MCP adapter on a computer with Android SDK
+Platform-Tools installed and reachable over the same local network as the phone.
+
+1. Install Google's Android SDK Platform-Tools and verify `adb version`.
+2. On Android enable Developer options → Wireless debugging.
+3. Open **Pair device with pairing code** and note the pairing IP:port and six-digit code.
+4. Call `android_adb_pair` with `endpoint` and `pairing_code`. Do not publish the code.
+5. Return to the main Wireless debugging screen. Note its **different connection port**.
+6. Call `android_adb_connect` with that IP:port, then `android_adb_status`.
+7. Call `android_adb_disconnect` when finished; turn off Wireless debugging on the phone.
+
+Only numeric private/local IPv4 endpoints are accepted. The tools intentionally
+do not offer arbitrary ADB shell commands, file extraction, or privilege escalation.
+ADB pairing is authorized by the phone's pairing code. These operations do not
+use the Android app's approval dialogs, because they operate through Android's
+separate Wireless Debugging subsystem. Keep the MCP client trusted and avoid
+logging pairing codes. The existing three relay-backed tools are unchanged.
+
+The hosted remote MCP endpoint will still expose only the original three tools.
+A future design for remotely initiating ADB would require an explicitly authorized,
+locally running ADB bridge; never expose the ADB port directly to the internet.

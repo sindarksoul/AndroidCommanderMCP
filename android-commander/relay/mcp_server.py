@@ -2,6 +2,7 @@
 import os
 import httpx
 from mcp.server.fastmcp import FastMCP
+import adb_wifi
 
 mcp=FastMCP("Android Commander")
 BASE=os.environ["RELAY_URL"].rstrip("/")
@@ -29,5 +30,30 @@ def android_battery_info() -> dict:
 def android_storage_info() -> dict:
     """Ask the Android user to approve reading device internal storage capacity and free space."""
     return request("storage_info")
+
+@mcp.tool()
+def android_adb_pair(endpoint: str, pairing_code: str) -> dict:
+    """Pair with a local Android Wireless Debugging endpoint; requires phone's six-digit code."""
+    return adb_wifi.pair(endpoint, pairing_code)
+
+@mcp.tool()
+def android_adb_connect(endpoint: str) -> dict:
+    """Connect to the phone's separate Wireless Debugging connection port on the local network."""
+    return adb_wifi.connect(endpoint)
+
+@mcp.tool()
+def android_adb_devices() -> dict:
+    """List ADB devices connected to the local MCP host."""
+    return adb_wifi.devices()
+
+@mcp.tool()
+def android_adb_status() -> dict:
+    """Return connected ADB device identifiers and states."""
+    return adb_wifi.status()
+
+@mcp.tool()
+def android_adb_disconnect(endpoint: str) -> dict:
+    """Disconnect one local Wi-Fi ADB endpoint."""
+    return adb_wifi.disconnect(endpoint)
 
 if __name__=="__main__": mcp.run(transport="stdio")
