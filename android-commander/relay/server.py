@@ -1,5 +1,5 @@
 """Single-device, single-process MVP relay. Deploy behind HTTPS; no multi-worker replicas."""
-import os, secrets, time, uuid, asyncio
+import os, secrets, time, uuid, asyncio, re
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException
 from starlette.responses import PlainTextResponse
@@ -37,7 +37,8 @@ async def lifespan(app):
 
 app = FastAPI(title="Android Commander Relay", docs_url=None, redoc_url=None,
               openapi_url=None, lifespan=lifespan)
-ALLOWED = {"device_info", "battery_info", "storage_info"}
+ALLOWED = {"device_info", "battery_info", "storage_info", "list_files", "file_info", "read_file"}
+FILE_OPS = {"list_files", "file_info", "read_file"}
 jobs = {}
 queue = asyncio.Queue(maxsize=32)
 
@@ -51,6 +52,33 @@ class Result(BaseModel):
     total_bytes: int | None = None
     free_bytes: int | None = None
     error: str | None = None
+    entries: list[dict] | None = None
+    name: str | None = None
+    path: str | None = None
+    size: int | None = None
+    mime_type: str | None = None
+    is_directory: bool | None = None
+    text: str | None = None
+    truncated: bool | None = None
+
+class FileArgs(BaseModel):
+    path: str = ""
+
+def validate_args(operation: str, args: dict | None):
+    args = args or {}
+    if operation not in FILE_OPS:
+        return {}
+    path = args.get("path", "")
+    if not isinstance(path, str) or len(path) > 512 or "\\x00" in path:
+        raise ValueError("Invalid file path")
+    parts = path.split("/")
+    if path.startswith("/") or any(p in ("", ".", "..") for p in parts if path):
+        raise ValueError("Only safe relative paths are allowed")
+    if "\\" in path:
+        raise ValueError("Backslashes are not allowed")
+    if operation != "list_files" and not path:
+        raise ValueError("A relative file path is required")
+    return {"path": path}
 
 def auth(header, token):
     if not header or not secrets.compare_digest(header, f"Bearer {token}"):
@@ -70,7 +98,7 @@ async def device_next(authorization: str | None = Header(default=None)):
         while True:
             id = queue.get_nowait()
             if id in jobs:
-                return {"id": id, "operation": jobs[id]["operation"]}
+                return {"id": id, "operation": jobs[id]["operation"], "arguments": jobs[id]["arguments"]}
     except asyncio.QueueEmpty:
         return {"id": None}
 
@@ -83,12 +111,14 @@ async def device_result(id: str, result: Result, authorization: str | None = Hea
     return {"ok":True}
 
 @app.post("/client/request/{operation}")
-async def client_request(operation: str, authorization: str | None = Header(default=None)):
+async def client_request(operation: str, args: FileArgs | None = None, authorization: str | None = Header(default=None)):
     auth(authorization, CLIENT_TOKEN)
     cleanup()
     if operation not in ALLOWED: raise HTTPException(400, "Unsupported operation")
+    try: arguments = validate_args(operation, args.model_dump() if args else {})
+    except ValueError as e: raise HTTPException(400, str(e))
     id=str(uuid.uuid4())
-    job={"operation":operation,"created":time.monotonic(),"result":None,"event":asyncio.Event()}
+    job={"operation":operation,"arguments":arguments,"created":time.monotonic(),"result":None,"event":asyncio.Event()}
     jobs[id]=job
     try: queue.put_nowait(id)
     except asyncio.QueueFull:
@@ -102,13 +132,14 @@ async def client_request(operation: str, authorization: str | None = Header(defa
     finally: jobs.pop(id,None)
 
 
-async def dispatch(operation: str):
+async def dispatch(operation: str, args: dict | None = None):
     """Queue a request for the already-connected Android app; approval happens on device."""
     cleanup()
     if operation not in ALLOWED:
         raise ValueError("Unsupported operation")
+    arguments = validate_args(operation, args)
     job_id = str(uuid.uuid4())
-    job = {"operation": operation, "created": time.monotonic(),
+    job = {"operation": operation, "arguments": arguments, "created": time.monotonic(),
            "result": None, "event": asyncio.Event()}
     jobs[job_id] = job
     try:
@@ -132,6 +163,21 @@ async def android_battery_info() -> dict:
 async def android_storage_info() -> dict:
     """Request internal storage capacity and free space, with phone-side approval."""
     return await dispatch("storage_info")
+
+@mcp.tool()
+async def android_list_files(path: str = "") -> dict:
+    """List up to 100 entries inside a user-selected Android folder. Path is relative to that folder; phone approval required."""
+    return await dispatch("list_files", {"path": path})
+
+@mcp.tool()
+async def android_file_info(path: str) -> dict:
+    """Get metadata for a file or folder inside the approved Android folder. Relative path; phone approval required."""
+    return await dispatch("file_info", {"path": path})
+
+@mcp.tool()
+async def android_read_file(path: str) -> dict:
+    """Read up to 16 KiB from an approved UTF-8 text file inside the selected Android folder. Phone approval required."""
+    return await dispatch("read_file", {"path": path})
 
 class MCPTokenGuard:
     """Restrict all remote MCP HTTP methods to the separate client bearer token."""
