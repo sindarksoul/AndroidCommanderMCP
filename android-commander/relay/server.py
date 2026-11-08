@@ -1,13 +1,24 @@
 """Single-device, single-process MVP relay. Deploy behind HTTPS; no multi-worker replicas."""
 import os, secrets, time, uuid, asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException
+from starlette.responses import PlainTextResponse
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
 DEVICE_TOKEN = os.environ.get("DEVICE_TOKEN", "")
 CLIENT_TOKEN = os.environ.get("CLIENT_TOKEN", "")
 if not DEVICE_TOKEN or not CLIENT_TOKEN or DEVICE_TOKEN == CLIENT_TOKEN:
     raise RuntimeError("Set distinct DEVICE_TOKEN and CLIENT_TOKEN environment variables")
-app = FastAPI(title="Android Commander Relay", docs_url=None, redoc_url=None, openapi_url=None)
+mcp = FastMCP("Android Commander", stateless_http=True, json_response=True, streamable_http_path="/")
+
+@asynccontextmanager
+async def lifespan(app):
+    async with mcp.session_manager.run():
+        yield
+
+app = FastAPI(title="Android Commander Relay", docs_url=None, redoc_url=None,
+              openapi_url=None, lifespan=lifespan)
 ALLOWED = {"device_info", "battery_info", "storage_info"}
 jobs = {}
 queue = asyncio.Queue(maxsize=32)
@@ -71,3 +82,53 @@ async def client_request(operation: str, authorization: str | None = Header(defa
     except asyncio.TimeoutError:
         raise HTTPException(504,"Timed out waiting for Android approval")
     finally: jobs.pop(id,None)
+
+
+async def dispatch(operation: str):
+    """Queue a request for the already-connected Android app; approval happens on device."""
+    cleanup()
+    if operation not in ALLOWED:
+        raise ValueError("Unsupported operation")
+    job_id = str(uuid.uuid4())
+    job = {"operation": operation, "created": time.monotonic(),
+           "result": None, "event": asyncio.Event()}
+    jobs[job_id] = job
+    try:
+        queue.put_nowait(job_id)
+        await asyncio.wait_for(job["event"].wait(), timeout=75)
+        return job["result"]
+    finally:
+        jobs.pop(job_id, None)
+
+@mcp.tool()
+async def android_device_info() -> dict:
+    """Request Android model, manufacturer and OS version, with phone-side approval."""
+    return await dispatch("device_info")
+
+@mcp.tool()
+async def android_battery_info() -> dict:
+    """Request battery percentage and charging status, with phone-side approval."""
+    return await dispatch("battery_info")
+
+@mcp.tool()
+async def android_storage_info() -> dict:
+    """Request internal storage capacity and free space, with phone-side approval."""
+    return await dispatch("storage_info")
+
+class MCPTokenGuard:
+    """Restrict all remote MCP HTTP methods to the separate client bearer token."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            provided = headers.get(b"authorization", b"")
+            expected = ("Bearer " + CLIENT_TOKEN).encode()
+            if not secrets.compare_digest(provided, expected):
+                response = PlainTextResponse("Unauthorized", status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+app.mount("/mcp", MCPTokenGuard(mcp.streamable_http_app()))
