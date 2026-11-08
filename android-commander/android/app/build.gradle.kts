@@ -4,3 +4,5 @@ android { namespace = "com.androidcommander.app"; compileSdk = 35
  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
  kotlinOptions { jvmTarget = "17" }
 }
+
+dependencies { implementation("androidx.documentfile:documentfile:1.0.1") }
