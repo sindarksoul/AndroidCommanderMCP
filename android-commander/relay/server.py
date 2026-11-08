@@ -4,13 +4,31 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException
 from starlette.responses import PlainTextResponse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 
 DEVICE_TOKEN = os.environ.get("DEVICE_TOKEN", "")
 CLIENT_TOKEN = os.environ.get("CLIENT_TOKEN", "")
 if not DEVICE_TOKEN or not CLIENT_TOKEN or DEVICE_TOKEN == CLIENT_TOKEN:
     raise RuntimeError("Set distinct DEVICE_TOKEN and CLIENT_TOKEN environment variables")
-mcp = FastMCP("Android Commander", stateless_http=True, json_response=True, streamable_http_path="/")
+
+mcp = FastMCP(
+    "Android Commander",
+    stateless_http=True,
+    json_response=True,
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "android-commander-relay.onrender.com",
+            "android-commander-relay.onrender.com:443",
+        ],
+        allowed_origins=[
+            "https://android-commander-relay.onrender.com",
+        ],
+    ),
+)
+
 
 @asynccontextmanager
 async def lifespan(app):
